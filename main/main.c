@@ -83,7 +83,7 @@ void led_rgb_init(void) {
 void trigger_task(void *p){
     while (1){
         gpio_put(TRIGGER, 1);
-        sleep_us(10);
+        vTaskDelay(pdMS_TO_TICKS(1));
         gpio_put(TRIGGER, 0);
         xSemaphoreGive(xSemaphoreTrigger);
         vTaskDelay(pdMS_TO_TICKS(1000));
