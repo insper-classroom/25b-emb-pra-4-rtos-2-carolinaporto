@@ -15,11 +15,23 @@
 ssd1306_t disp;
 
 QueueHandle_t xQueueBtn;
+QueueHandle_t xQueueTime;
+QueueHandle_t xQueueDistance;
+SemaphoreHandle_t xSemaphoreTrigger;
+
+const int ECHO = 16;
+const int TRIGGER = 17;
 
 // == funcoes de inicializacao ===
 void btn_callback(uint gpio, uint32_t events) {
     if (events & GPIO_IRQ_EDGE_FALL) xQueueSendFromISR(xQueueBtn, &gpio, 0);
 }
+
+void pin_callback(uint gpio, uint32_t events){
+    uint32_t time = to_us_since_boot(get_absolute_time());
+    xQueueSendFromISR(xQueueTime, &time, 0);
+}
+
 
 void oled_display_init(void) {
     i2c_init(i2c1, 400000);
@@ -47,13 +59,11 @@ void btns_init(void) {
     gpio_set_dir(BTN_PIN_B, GPIO_IN);
     gpio_pull_up(BTN_PIN_B);
 
-    gpio_set_irq_enabled_with_callback(BTN_PIN_R,
-                                       GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL,
-                                       true, &btn_callback);
-    gpio_set_irq_enabled(BTN_PIN_G, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL,
-                         true);
-    gpio_set_irq_enabled(BTN_PIN_B, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL,
-                         true);
+    gpio_init(ECHO); gpio_set_dir(ECHO, GPIO_IN); gpio_disable_pulls(ECHO);
+    gpio_init(TRIGGER); gpio_set_dir(TRIGGER, GPIO_OUT);
+
+    gpio_set_irq_enabled_with_callback(ECHO, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true, &pin_callback);
+
 }
 
 void led_rgb_init(void) {
@@ -69,6 +79,69 @@ void led_rgb_init(void) {
     gpio_set_dir(LED_PIN_B, GPIO_OUT);
     gpio_put(LED_PIN_B, 1);
 }
+
+void trigger_task(void *p){
+    while (1){
+        gpio_put(TRIGGER, 1);
+        sleep_us(10);
+        gpio_put(TRIGGER, 0);
+        xSemaphoreGive(xSemaphoreTrigger);
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
+void echo_task(void *p){
+    uint32_t t_inicial = 0;
+    uint32_t t_final = 0;
+    btns_init();
+    while(1){
+        if (xQueueReceive(xQueueTime, &t_inicial,  pdMS_TO_TICKS(100))){
+            if (xQueueReceive(xQueueTime, &t_final,  pdMS_TO_TICKS(100))){
+                float distance  = (t_final - t_inicial)/58.0f;
+                xQueueSend(xQueueDistance, &distance, 0);
+            }
+        }
+    }
+
+}
+
+void oled_task(void *p){
+    led_rgb_init();
+    oled_display_init();
+    btns_init();
+
+
+    float distance;
+    char buffer[32];
+
+    while(1){
+        if(xSemaphoreTake(xSemaphoreTrigger, pdMS_TO_TICKS(100))) {
+            if (xQueueReceive(xQueueDistance, &distance,  pdMS_TO_TICKS(100))) {
+                if ((int)distance > 100) {
+                    gpio_put(LED_PIN_R, 0); gpio_put(LED_PIN_G, 0); gpio_put(LED_PIN_B, 1);
+                }
+                else{
+                    gpio_put(LED_PIN_G, 0); gpio_put(LED_PIN_B, 1); gpio_put(LED_PIN_R, 1);
+                }
+            } else {
+                gpio_put(LED_PIN_R, 0); gpio_put(LED_PIN_G, 1); gpio_put(LED_PIN_B, 1);
+                sprintf(buffer, "%s", "ERRO");
+                ssd1306_clear(&disp);
+                ssd1306_draw_string(&disp, 8, 0, 2, buffer);
+                ssd1306_show(&disp);
+                continue;
+            }
+
+            sprintf(buffer, "%d", (int)distance);
+
+            ssd1306_clear(&disp);
+            ssd1306_draw_string(&disp, 8, 0, 2, buffer);
+            ssd1306_draw_square(&disp, 0, 32, (int)distance/4, 16);
+            ssd1306_show(&disp);
+        }
+    }
+}
+
 
 void task_1(void *p) {
     btns_init();
@@ -112,11 +185,20 @@ void task_1(void *p) {
     }
 }
 
+
 int main() {
     stdio_init_all();
 
     xQueueBtn = xQueueCreate(32, sizeof(uint));
-    xTaskCreate(task_1, "Task 1", 8192, NULL, 1, NULL);
+    xQueueTime = xQueueCreate(32, sizeof(uint));
+    xQueueDistance = xQueueCreate(32, sizeof(float));
+    
+    xSemaphoreTrigger = xSemaphoreCreateBinary();
+
+    xTaskCreate(oled_task, "Task 1", 8192, NULL, 1, NULL);
+    xTaskCreate(trigger_task, "Trigger Task", 8192, NULL, 1, NULL);
+    xTaskCreate(echo_task, "Echo task", 8192, NULL, 1, NULL);
+
 
     vTaskStartScheduler();
 
